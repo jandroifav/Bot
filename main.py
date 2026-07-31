@@ -170,14 +170,15 @@ async def on_message(message):
 
             if central_channel:
                 role_ping = f"<@&{cfg['role_id']}>" if cfg['role_id'] else ""
-                content_text = f"{role_ping}\n<{cfg['sheet_url']}>" if role_ping else f"<{cfg['sheet_url']}>"
+                
+                embed_description = f"📋 [**Players missing in the spreadsheet:**]({cfg['sheet_url']})\n\n" + "\n".join(missing_players)
 
                 embed = discord.Embed(
-                    description="📋 **Players missing in the spreadsheet:**\n\n" + "\n".join(missing_players),
+                    description=embed_description,
                     color=discord.Color.from_rgb(231, 76, 60)
                 )
 
-                await central_channel.send(content=content_text, embed=embed)
+                await central_channel.send(content=role_ping if role_ping else None, embed=embed)
 
 def process_audit(cfg, raw_audit_text):
     global sheets_client
