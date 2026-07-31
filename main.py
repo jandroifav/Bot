@@ -1,7 +1,30 @@
 import os
+import sys
 import asyncio
 import re
 import logging
+from threading import Thread
+from flask import Flask
+
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.ERROR)
+
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot is alive and running!"
+
+def run_web_server():
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port)
+
+def keep_alive():
+    t = Thread(target=run_web_server, daemon=True)
+    t.start()
+
+keep_alive()
+
 import discord
 from discord.ext import commands
 import gspread
