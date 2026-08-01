@@ -4,8 +4,10 @@ import asyncio
 import re
 import logging
 import time
+import socket
 from threading import Thread
 from flask import Flask
+from werkzeug.serving import run_simple
 
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR)
@@ -18,7 +20,7 @@ def home():
 
 def run_web_server():
     port = int(os.environ.get('PORT', 10000))
-    app.run(host='0.0.0.0', port=port)
+    run_simple('0.0.0.0', port, app, use_reloader=False, use_debugger=False, threaded=True)
 
 def keep_alive():
     t = Thread(target=run_web_server, daemon=True)
@@ -140,6 +142,10 @@ async def on_message(message):
     await bot.process_commands(message)
 
     if message.channel.id in REGIMENT_CONFIGS:
+        first_line = message.content.split('\n')[0].strip()
+        if not first_line.lower().startswith("event type:"):
+            return
+
         cfg = REGIMENT_CONFIGS[message.channel.id]
         
         try:
