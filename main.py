@@ -48,6 +48,7 @@ SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "service_acco
 
 CONFIG_SPREADSHEET_ID = "1F1V-fgge7UhaQmqgZsEtf6mExGNJU_JFSHfHr7fJ2lQ"
 CENTRAL_CHANNEL_ID = 1506368484529934476
+ERROR_CHANNEL_ID = 1535622483019960372
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -154,13 +155,32 @@ async def on_message(message):
             print(f"[Warning] Could not add hourglass reaction: {e}")
 
         loop = asyncio.get_running_loop()
-        missing_players, error_msg = await loop.run_in_executor(None, process_audit, cfg, message.content)
+        missing_players, error_msg, error_type = await loop.run_in_executor(None, process_audit, cfg, message.content)
 
         try:
             await message.remove_reaction("⏳", bot.user)
             if error_msg:
-                await message.add_reaction("❌")
-                print(f"[Audit Error] {error_msg}")
+                reaction_emoji = "⚠️" if error_type in ["INVALID_DATE", "SLOTS_FULL"] else "❌"
+                await message.add_reaction(reaction_emoji)
+                
+                error_channel = bot.get_channel(ERROR_CHANNEL_ID)
+                if not error_channel:
+                    try:
+                        error_channel = await bot.fetch_channel(ERROR_CHANNEL_ID)
+                    except Exception as fetch_err:
+                        print(f"[Error] Could not fetch error log channel: {fetch_err}")
+
+                if error_channel:
+                    err_embed = discord.Embed(
+                        title="⚠️ Audit Processing Error",
+                        color=discord.Color.from_rgb(241, 196, 15) if reaction_emoji == "⚠️" else discord.Color.from_rgb(231, 76, 60)
+                    )
+                    err_embed.add_field(name="Error Reason", value=f"`{error_type}`: {error_msg}", inline=False)
+                    err_embed.add_field(name="Audit Message Link", value=f"[Jump to Message]({message.jump_url})", inline=False)
+                    err_embed.add_field(name="Channel", value=message.channel.mention, inline=True)
+                    err_embed.add_field(name="Posted By", value=message.author.mention, inline=True)
+                    
+                    await error_channel.send(embed=err_embed)
             else:
                 await message.add_reaction("✅")
         except Exception as e:
@@ -192,16 +212,90 @@ def process_audit(cfg, raw_audit_text):
         sheets_client = get_sheets_client()
 
     if not sheets_client:
-        return None, "Google Sheets client not initialized."
+        return None, "Google Sheets client not initialized.", "INIT_ERROR"
 
     try:
         reg_sheet = safe_sheet_action(sheets_client.open_by_url, cfg["sheet_url"])
         if not reg_sheet:
-            return None, "Failed to open regimental spreadsheet."
+            return None, "Failed to open regimental spreadsheet.", "SHEET_OPEN_ERROR"
 
         input_ws = safe_sheet_action(reg_sheet.worksheet, "Input")
         if not input_ws:
-            return None, "Worksheet 'Input' not found."
+            return None, "Worksheet 'Input' not found.", "WORKSHEET_ERROR"
+
+        lines = [line.strip() for line in raw_audit_text.split('\n') if line.strip()]
+        if len(lines) < 2:
+            return None, "Audit message missing date line or invalid format.", "FORMAT_ERROR"
+
+        first_line = lines[0]
+        second_line = lines[1]
+
+        row5_vals = safe_sheet_action(input_ws.get, "K5:AC5")
+        if not row5_vals or len(row5_vals) == 0:
+            return None, "Failed reading row 5 dates from spreadsheet.", "SHEET_READ_ERROR"
+
+        date_row = row5_vals[0]
+        target_col_idx = -1
+
+        for col_i in range(0, len(date_row), 3):
+            cell_val = date_row[col_i].strip() if col_i < len(date_row) else ""
+            if cell_val and cell_val in second_line:
+                target_col_idx = 11 + col_i
+                break
+
+        if target_col_idx == -1:
+            return None, f"Date line '{second_line}' does not match any date in row 5 (K5:AC5).", "INVALID_DATE"
+
+        col_letter = gspread.utils.rowcol_to_a1(1, target_col_idx)[:-1]
+
+        t6_val = safe_sheet_action(input_ws.acell, f"{col_letter}6")
+        t6_p1 = safe_sheet_action(input_ws.acell, f"{col_letter}7")
+        t77_val = safe_sheet_action(input_ws.acell, f"{col_letter}77")
+        t77_p1 = safe_sheet_action(input_ws.acell, f"{col_letter}78")
+        t138_val = safe_sheet_action(input_ws.acell, f"{col_letter}138")
+        t138_p1 = safe_sheet_action(input_ws.acell, f"{col_letter}139")
+
+        def is_tier_empty(dropdown_obj, player_obj):
+            d_val = dropdown_obj.value.strip() if dropdown_obj and dropdown_obj.value else ""
+            p_val = player_obj.value.strip() if player_obj and player_obj.value else ""
+            return (d_val in ["", "N/A", "NA"]) and (p_val == "")
+
+        t6_empty = is_tier_empty(t6_val, t6_p1)
+        t77_empty = is_tier_empty(t77_val, t77_p1)
+        t138_empty = is_tier_empty(t138_val, t138_p1)
+
+        start_tier = 6
+        if "Ceremony" in first_line:
+            start_tier = 138
+        elif "AS" in first_line:
+            toolbox_ws = safe_sheet_action(reg_sheet.worksheet, "Toolbox")
+            m_tz = ""
+            if toolbox_ws:
+                m_tz_cell = safe_sheet_action(toolbox_ws.acell, "O61")
+                if m_tz_cell and m_tz_cell.value:
+                    m_tz = m_tz_cell.value.strip()
+            start_tier = 6 if m_tz == "AS/OC" else 138
+        elif "NA" in first_line or "N/A" in first_line:
+            start_tier = 77
+        elif "EU" in first_line or "Main" in first_line:
+            start_tier = 6
+
+        tiers_to_check = [t for t in [6, 77, 138] if t >= start_tier]
+        slot_found = False
+
+        for t in tiers_to_check:
+            if t == 6 and t6_empty:
+                slot_found = True
+                break
+            elif t == 77 and t77_empty:
+                slot_found = True
+                break
+            elif t == 138 and t138_empty:
+                slot_found = True
+                break
+
+        if not slot_found:
+            return None, f"All available event tiers (rows 6, 77, 138) for date '{second_line}' are already filled.", "SLOTS_FULL"
 
         safe_sheet_action(input_ws.batch_clear, ["H9:H40"])
         safe_sheet_action(input_ws.update_acell, "C3", raw_audit_text)
@@ -225,10 +319,10 @@ def process_audit(cfg, raw_audit_text):
                     if row and len(row) > 0 and row[0].strip():
                         missing_players.append(row[0].strip())
 
-        return missing_players, None
+        return missing_players, None, None
 
     except Exception as e:
-        return None, f"Audit processing failed: {str(e)}"
+        return None, f"Audit processing failed: {str(e)}", "SYSTEM_ERROR"
 
 async def start_bot():
     while True:
