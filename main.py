@@ -222,7 +222,7 @@ def process_audit(cfg, raw_audit_text):
         first_line = lines[0]
         second_line = lines[1]
 
-        player_entry_pattern = re.compile(r"^.+?\shas\s+\d+\s+kills\s+and\s+\d+\s+deaths$", re.IGNORECASE)
+        player_entry_pattern = re.compile(r"^.+?\shas\s+\d+\s+kills\s+and\s+\d+\s+points$", re.IGNORECASE)
 
         for idx, line in enumerate(lines[3:], start=4):
             if not player_entry_pattern.match(line):
