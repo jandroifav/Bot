@@ -226,7 +226,7 @@ def process_audit(cfg, raw_audit_text):
 
         for idx, line in enumerate(lines[3:], start=4):
             if not player_entry_pattern.match(line):
-                return None, f"Incorrect body format at line {idx}: `{line}`. Expected format: `[PlayerName] has X kills and Y deaths`.", "INVALID_BODY_FORMAT"
+                return None, f"Incorrect body format at line {idx}: `{line}`. Expected format: `[PlayerName] has X kills and Y points`.", "INVALID_BODY_FORMAT"
 
         reg_sheet = safe_sheet_action(sheets_client.open_by_url, cfg["sheet_url"])
         if not reg_sheet:
