@@ -224,8 +224,7 @@ def process_audit(cfg, raw_audit_text):
 
         player_entry_pattern = re.compile(r"^.+?\shas\s+\d+\s+kills\s+and\s+\d+\s+points$", re.IGNORECASE)
 
-        for idx, line in enumerate(lines[3:], start=4):
-            print(line)
+        for idx, line in enumerate(lines.strip()):
             if not player_entry_pattern.match(line):
                 return None, f"Incorrect body format at line {idx}: {line}. Expected format: [PlayerName] has X kills and Y points.", "INVALID_BODY_FORMAT"
 
