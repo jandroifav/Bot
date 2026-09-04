@@ -8,6 +8,13 @@ import socket
 from threading import Thread
 from flask import Flask
 from werkzeug.serving import run_simple
+import discord
+from discord.ext import commands
+import gspread
+from gspread.exceptions import APIError
+from google.oauth2.service_account import Credentials
+import requests
+from dotenv import load_dotenv
 
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR)
@@ -27,14 +34,6 @@ def keep_alive():
     t.start()
 
 keep_alive()
-
-import discord
-from discord.ext import commands
-import gspread
-from gspread.exceptions import APIError
-from google.oauth2.service_account import Credentials
-import requests
-from dotenv import load_dotenv
 
 logging.getLogger("google").setLevel(logging.ERROR)
 logging.getLogger("google.auth").setLevel(logging.ERROR)
@@ -160,7 +159,7 @@ async def on_message(message):
         try:
             await message.remove_reaction("⏳", bot.user)
             if error_msg:
-                reaction_emoji = "⚠️" if error_type in ["INVALID_DATE", "SLOTS_FULL"] else "❌"
+                reaction_emoji = "⚠️" if error_type in ["INVALID_DATE", "SLOTS_FULL", "INVALID_BODY_FORMAT"] else "❌"
                 await message.add_reaction(reaction_emoji)
                 
                 error_channel = bot.get_channel(ERROR_CHANNEL_ID)
@@ -215,6 +214,20 @@ def process_audit(cfg, raw_audit_text):
         return None, "Google Sheets client not initialized.", "INIT_ERROR"
 
     try:
+        lines = [line.strip() for line in raw_audit_text.split('\n') if line.strip()]
+        
+        if len(lines) < 4:
+            return None, "Audit message is missing required header lines or player data.", "FORMAT_ERROR"
+
+        first_line = lines[0]
+        second_line = lines[1]
+
+        player_entry_pattern = re.compile(r"^.+?\shas\s+\d+\s+kills\s+and\s+\d+\s+deaths$", re.IGNORECASE)
+
+        for idx, line in enumerate(lines[3:], start=4):
+            if not player_entry_pattern.match(line):
+                return None, f"Incorrect body format at line {idx}: `{line}`. Expected format: `[PlayerName] has X kills and Y deaths`.", "INVALID_BODY_FORMAT"
+
         reg_sheet = safe_sheet_action(sheets_client.open_by_url, cfg["sheet_url"])
         if not reg_sheet:
             return None, "Failed to open regimental spreadsheet.", "SHEET_OPEN_ERROR"
@@ -222,13 +235,6 @@ def process_audit(cfg, raw_audit_text):
         input_ws = safe_sheet_action(reg_sheet.worksheet, "Input")
         if not input_ws:
             return None, "Worksheet 'Input' not found.", "WORKSHEET_ERROR"
-
-        lines = [line.strip() for line in raw_audit_text.split('\n') if line.strip()]
-        if len(lines) < 2:
-            return None, "Audit message missing date line or invalid format.", "FORMAT_ERROR"
-
-        first_line = lines[0]
-        second_line = lines[1]
 
         row5_vals = safe_sheet_action(input_ws.get, "K5:AC5")
         if not row5_vals or len(row5_vals) == 0:
