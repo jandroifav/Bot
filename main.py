@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import logging
+import re
 import threading
 import requests
 import gspread
@@ -42,17 +43,14 @@ CONFIG_SHEET_ID = os.environ.get("SPREADSHEET_ID", "1F1V-fgge7UhaQmqgZsEtf6mExGN
 REGIMENT_CONFIGS = {}
 
 def get_gspread_client():
-    # Checks GOOGLE_APPLICATION_CREDENTIALS first, then GOOGLE_CREDENTIALS
     creds_raw = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS") or os.environ.get("GOOGLE_CREDENTIALS")
     if not creds_raw:
         raise ValueError("Missing GOOGLE_APPLICATION_CREDENTIALS environment variable.")
     
-    # Check if the variable is a raw JSON string or a file path
     if creds_raw.strip().startswith("{"):
         creds_dict = json.loads(creds_raw)
         return gspread.service_account_from_dict(creds_dict)
     else:
-        # If it points to a local file path
         return gspread.service_account(filename=creds_raw)
 
 def safe_sheet_action(func, *args, **kwargs):
@@ -62,8 +60,6 @@ def safe_sheet_action(func, *args, **kwargs):
     except Exception as e:
         logger.error(f"Sheet action error: {e}")
         raise e
-
-import re
 
 def extract_spreadsheet_id(url_or_id: str) -> str:
     """Extracts raw spreadsheet ID from a full Google Sheets URL or raw ID string."""
@@ -80,6 +76,12 @@ def load_configs():
         ss = gc.open_by_key(CONFIG_SHEET_ID)
         config_ws = ss.worksheet("Spreadsheet Info Storage")
         
+        # Expected Column Layout:
+        # Col A (0): Regiment Name
+        # Col B (1): Spreadsheet ID / URL
+        # Col C (2): Apps Script URL
+        # Col D (3): Staff Server Role
+        # Col E (4): Audit Channel ID
         rows = config_ws.get_all_values()
         if len(rows) < 2:
             logger.warning("No configuration rows found in Spreadsheet Info Storage.")
@@ -87,7 +89,6 @@ def load_configs():
 
         new_configs = {}
         for row in rows[1:]:
-            # Ensure row has enough columns and column E (index 4) contains a valid Channel ID
             if len(row) >= 5 and row[4].strip().isdigit():
                 channel_id = int(row[4].strip())
                 raw_sheet_val = row[1].strip()
@@ -104,6 +105,7 @@ def load_configs():
         logger.info(f"Successfully loaded {len(REGIMENT_CONFIGS)} regiment channel configurations.")
     except Exception as e:
         logger.error(f"Failed to load spreadsheet configurations: {e}")
+
 # ---------------------------------------------------------
 # Bot Commands & Event Listeners
 # ---------------------------------------------------------
@@ -137,7 +139,8 @@ async def on_message(message):
 
     cfg = REGIMENT_CONFIGS[message.channel.id]
     await message.add_reaction("⏳")
-try:
+
+    try:
         gc = get_gspread_client()
         reg_ss = gc.open_by_key(cfg["spreadsheet_id"])
         input_ws = reg_ss.worksheet("Input")
@@ -176,14 +179,20 @@ try:
             target_chan = bot.get_channel(target_channel_id) or await bot.fetch_channel(target_channel_id)
 
             if target_chan:
-                # Prepare role ping if available in Column D
-                staff_role_ping = f"<@&{cfg['staff_role']}>" if cfg.get("staff_role") and cfg["staff_role"].isdigit() else f"@{cfg.get('staff_role', '')}"
+                # Prepare role ping from Column D
+                staff_role_val = cfg.get("staff_role", "")
+                if staff_role_val.isdigit():
+                    staff_role_ping = f"<@&{staff_role_val}>"
+                elif staff_role_val:
+                    staff_role_ping = f"@{staff_role_val}"
+                else:
+                    staff_role_ping = ""
 
-                # Create Embed matching screenshot format
+                # Create Embed matching requested layout
                 embed = discord.Embed(
                     title="📋 Players missing in the spreadsheet:",
                     description="\n".join(missing_players),
-                    color=discord.Color.from_rgb(238, 44, 44)  # Red border bar
+                    color=discord.Color.from_rgb(238, 44, 44)
                 )
 
                 await target_chan.send(content=staff_role_ping, embed=embed)
@@ -202,7 +211,5 @@ if __name__ == "__main__":
         print("FATAL: DISCORD_TOKEN environment variable not set.", flush=True)
         sys.exit(1)
         
-    # Start web server in background thread so Render port checks pass
     threading.Thread(target=run_web_server, daemon=True).start()
-    
     bot.run(token)
