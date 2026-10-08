@@ -2,4 +2,5 @@ discord.py
 gspread
 google-auth
 python-dotenv
+requests
 flask
