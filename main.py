@@ -136,33 +136,25 @@ async def on_message(message):
 
     try:
         gc = get_gspread_client()
-        print(f"Opening spreadsheet key: {cfg['spreadsheet_id']}", flush=True)
         reg_ss = gc.open_by_key(cfg["spreadsheet_id"])
-        
-        print("Opening worksheet 'Input'...", flush=True)
         input_ws = reg_ss.worksheet("Input")
 
         # 1. Clear previous missing roster outputs in P6:P37
-        print("Clearing P6:P37...", flush=True)
         safe_sheet_action(input_ws.batch_clear, ["P6:P37"])
 
         # 2. Paste raw audit text into Input!C3
-        print("Updating C3 with audit text...", flush=True)
         safe_sheet_action(input_ws.update_acell, "C3", raw_text)
 
         # 3. Call Google Apps Script Web App Endpoint
-        print(f"Calling Apps Script endpoint: {cfg['script_url']}", flush=True)
-        response = requests.post(cfg["script_url"], json={"action": "run"}, timeout=45)
-        
-        if response.status_code != 200:
-            raise Exception(f"Google Apps Script returned HTTP {response.status_code}: {response.text}")
+        if cfg.get("script_url"):
+            print(f"Calling Apps Script: {cfg['script_url']}", flush=True)
+            response = requests.post(cfg["script_url"], json={"action": "run"}, timeout=45)
+            
+            # If Apps Script returns 404 or non-200, log warning but continue reading sheet if audit was logged
+            if response.status_code != 200:
+                print(f"Warning: Apps Script endpoint returned {response.status_code}. Continuing sheet read...", flush=True)
 
-        res_data = response.json()
-        if res_data.get("status") == "error":
-            raise Exception(f"Apps Script Error: {res_data.get('message')}")
-
-        # 4. Read missing players populated by Apps Script in P6:P37
-        print("Reading missing players from P6:P37...", flush=True)
+        # 4. Read missing players populated in P6:P37
         missing_vals = safe_sheet_action(input_ws.get, "P6:P37")
         missing_players = []
         if missing_vals:
@@ -170,24 +162,29 @@ async def on_message(message):
                 if row and len(row) > 0 and str(row[0]).strip():
                     missing_players.append(str(row[0]).strip())
 
-        # 5. Success UI Feedback on original audit message
+        # 5. React with Checkmark on original audit
         await message.remove_reaction("⏳", bot.user)
         await message.add_reaction("✅")
-        print("Audit processed successfully!", flush=True)
 
         # 6. Send Missing Roster Notification to Target Channel
         if missing_players:
             target_channel_id = 1506368484529934476
-            target_chan = bot.get_channel(target_channel_id) or await bot.fetch_channel(target_channel_id)
+            target_chan = bot.get_channel(target_channel_id)
+            if not target_chan:
+                try:
+                    target_chan = await bot.fetch_channel(target_channel_id)
+                except Exception as fetch_err:
+                    print(f"Could not fetch target missing players channel: {fetch_err}", flush=True)
 
             if target_chan:
-                staff_role_val = cfg.get("staff_role", "")
+                # Safely format staff role ping
+                staff_role_val = cfg.get("staff_role", "").strip()
                 if staff_role_val.isdigit():
                     staff_role_ping = f"<@&{staff_role_val}>"
-                elif staff_role_val:
-                    staff_role_ping = f"@{staff_role_val}"
+                elif staff_role_ping_str := re.search(r"\d+", staff_role_val):
+                    staff_role_ping = f"<@&{staff_role_ping_str.group(0)}>"
                 else:
-                    staff_role_ping = ""
+                    staff_role_ping = staff_role_val
 
                 embed = discord.Embed(
                     title="📋 Players missing in the spreadsheet:",
@@ -195,14 +192,14 @@ async def on_message(message):
                     color=discord.Color.from_rgb(238, 44, 44)
                 )
 
-                await target_chan.send(content=staff_role_ping, embed=embed)
+                await target_chan.send(content=staff_role_ping if staff_role_ping else None, embed=embed)
 
     except Exception as e:
         print(f"!!! ERROR processing audit in channel {message.channel.id}: {e}", flush=True)
         traceback.print_exc()
         await message.remove_reaction("⏳", bot.user)
         await message.add_reaction("❌")
-
+        
 # ---------------------------------------------------------
 # Application Entry Point
 # ---------------------------------------------------------
