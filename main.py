@@ -63,6 +63,15 @@ def safe_sheet_action(func, *args, **kwargs):
         logger.error(f"Sheet action error: {e}")
         raise e
 
+import re
+
+def extract_spreadsheet_id(url_or_id: str) -> str:
+    """Extracts raw spreadsheet ID from a full Google Sheets URL or raw ID string."""
+    match = re.search(r"/d/([a-zA-Z0-9-_]+)", url_or_id)
+    if match:
+        return match.group(1)
+    return url_or_id.strip()
+
 def load_configs():
     """Reads regiment channel configurations from Spreadsheet Info Storage."""
     global REGIMENT_CONFIGS
@@ -81,12 +90,14 @@ def load_configs():
             # Ensure row has enough columns and column E (index 4) contains a valid Channel ID
             if len(row) >= 5 and row[4].strip().isdigit():
                 channel_id = int(row[4].strip())
+                raw_sheet_val = row[1].strip()
+                
                 new_configs[channel_id] = {
                     "regiment_name": row[0].strip(),
-                    "spreadsheet_id": row[1].strip(),
+                    "spreadsheet_id": extract_spreadsheet_id(raw_sheet_val),
                     "script_url": row[2].strip(),
                     "staff_role": row[3].strip(),
-                    "error_channel_id": None  # Optional error channel ID
+                    "error_channel_id": None
                 }
         
         REGIMENT_CONFIGS = new_configs
