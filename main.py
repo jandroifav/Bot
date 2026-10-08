@@ -2,17 +2,35 @@ import os
 import sys
 import json
 import logging
+import threading
 import requests
 import gspread
 import discord
 from discord.ext import commands
+from flask import Flask
 
 # ---------------------------------------------------------
-# Logging & Discord Setup
+# Logging Setup
 # ---------------------------------------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("RegimentBot")
 
+# ---------------------------------------------------------
+# Keep-Alive HTTP Server (Fixes Free Render Web Service Timeout)
+# ---------------------------------------------------------
+app = Flask(__name__)
+
+@app.route("/")
+def health_check():
+    return "Bot is running!", 200
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
+
+# ---------------------------------------------------------
+# Discord Bot Setup
+# ---------------------------------------------------------
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -24,13 +42,18 @@ CONFIG_SHEET_ID = os.environ.get("SPREADSHEET_ID", "1F1V-fgge7UhaQmqgZsEtf6mExGN
 REGIMENT_CONFIGS = {}
 
 def get_gspread_client():
-    creds_json = os.environ.get("GOOGLE_CREDENTIALS")
-    if not creds_json:
-        raise ValueError("Missing GOOGLE_CREDENTIALS environment variable.")
+    # Checks GOOGLE_APPLICATION_CREDENTIALS first, then GOOGLE_CREDENTIALS
+    creds_raw = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS") or os.environ.get("GOOGLE_CREDENTIALS")
+    if not creds_raw:
+        raise ValueError("Missing GOOGLE_APPLICATION_CREDENTIALS environment variable.")
     
-    creds_dict = json.loads(creds_json)
-    # Authenticate using gspread's native google-auth helper
-    return gspread.service_account_from_dict(creds_dict)
+    # Check if the variable is a raw JSON string or a file path
+    if creds_raw.strip().startswith("{"):
+        creds_dict = json.loads(creds_raw)
+        return gspread.service_account_from_dict(creds_dict)
+    else:
+        # If it points to a local file path
+        return gspread.service_account(filename=creds_raw)
 
 def safe_sheet_action(func, *args, **kwargs):
     """Wrapper to handle automatic retry or client re-auth on sheet calls."""
@@ -161,4 +184,7 @@ if __name__ == "__main__":
         print("FATAL: DISCORD_TOKEN environment variable not set.", flush=True)
         sys.exit(1)
         
+    # Start web server in background thread so Render port checks pass
+    threading.Thread(target=run_web_server, daemon=True).start()
+    
     bot.run(token)
