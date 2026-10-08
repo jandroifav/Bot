@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import threading
+import traceback
 import requests
 import gspread
 import discord
@@ -58,7 +59,7 @@ def safe_sheet_action(func, *args, **kwargs):
     try:
         return func(*args, **kwargs)
     except Exception as e:
-        logger.error(f"Sheet action error: {e}")
+        print(f"Sheet action error: {e}", flush=True)
         raise e
 
 def extract_spreadsheet_id(url_or_id: str) -> str:
@@ -76,15 +77,9 @@ def load_configs():
         ss = gc.open_by_key(CONFIG_SHEET_ID)
         config_ws = ss.worksheet("Spreadsheet Info Storage")
         
-        # Expected Column Layout:
-        # Col A (0): Regiment Name
-        # Col B (1): Spreadsheet ID / URL
-        # Col C (2): Apps Script URL
-        # Col D (3): Staff Server Role
-        # Col E (4): Audit Channel ID
         rows = config_ws.get_all_values()
         if len(rows) < 2:
-            logger.warning("No configuration rows found in Spreadsheet Info Storage.")
+            print("No configuration rows found in Spreadsheet Info Storage.", flush=True)
             return
 
         new_configs = {}
@@ -102,16 +97,17 @@ def load_configs():
                 }
         
         REGIMENT_CONFIGS = new_configs
-        logger.info(f"Successfully loaded {len(REGIMENT_CONFIGS)} regiment channel configurations.")
+        print(f"Successfully loaded {len(REGIMENT_CONFIGS)} regiment channel configurations.", flush=True)
     except Exception as e:
-        logger.error(f"Failed to load spreadsheet configurations: {e}")
+        print(f"Failed to load spreadsheet configurations: {e}", flush=True)
+        traceback.print_exc()
 
 # ---------------------------------------------------------
 # Bot Commands & Event Listeners
 # ---------------------------------------------------------
 @bot.event
 async def on_ready():
-    logger.info(f"Logged in as {bot.user.name} ({bot.user.id})")
+    print(f"Logged in as {bot.user.name} ({bot.user.id})", flush=True)
     load_configs()
 
 @bot.command(name="reload")
@@ -122,14 +118,11 @@ async def reload_config_command(ctx):
 
 @bot.event
 async def on_message(message):
-    # Ignore bot messages
     if message.author.bot:
         return
 
-    # Process standard commands first (e.g. !reload)
     await bot.process_commands(message)
 
-    # Check if message is in an audit channel
     if message.channel.id not in REGIMENT_CONFIGS:
         return
 
@@ -139,19 +132,26 @@ async def on_message(message):
 
     cfg = REGIMENT_CONFIGS[message.channel.id]
     await message.add_reaction("⏳")
+    print(f"--> Processing audit for channel {message.channel.id}...", flush=True)
 
     try:
         gc = get_gspread_client()
+        print(f"Opening spreadsheet key: {cfg['spreadsheet_id']}", flush=True)
         reg_ss = gc.open_by_key(cfg["spreadsheet_id"])
+        
+        print("Opening worksheet 'Input'...", flush=True)
         input_ws = reg_ss.worksheet("Input")
 
         # 1. Clear previous missing roster outputs in P6:P37
+        print("Clearing P6:P37...", flush=True)
         safe_sheet_action(input_ws.batch_clear, ["P6:P37"])
 
         # 2. Paste raw audit text into Input!C3
+        print("Updating C3 with audit text...", flush=True)
         safe_sheet_action(input_ws.update_acell, "C3", raw_text)
 
         # 3. Call Google Apps Script Web App Endpoint
+        print(f"Calling Apps Script endpoint: {cfg['script_url']}", flush=True)
         response = requests.post(cfg["script_url"], json={"action": "run"}, timeout=45)
         
         if response.status_code != 200:
@@ -162,6 +162,7 @@ async def on_message(message):
             raise Exception(f"Apps Script Error: {res_data.get('message')}")
 
         # 4. Read missing players populated by Apps Script in P6:P37
+        print("Reading missing players from P6:P37...", flush=True)
         missing_vals = safe_sheet_action(input_ws.get, "P6:P37")
         missing_players = []
         if missing_vals:
@@ -172,6 +173,7 @@ async def on_message(message):
         # 5. Success UI Feedback on original audit message
         await message.remove_reaction("⏳", bot.user)
         await message.add_reaction("✅")
+        print("Audit processed successfully!", flush=True)
 
         # 6. Send Missing Roster Notification to Target Channel
         if missing_players:
@@ -179,7 +181,6 @@ async def on_message(message):
             target_chan = bot.get_channel(target_channel_id) or await bot.fetch_channel(target_channel_id)
 
             if target_chan:
-                # Prepare role ping from Column D
                 staff_role_val = cfg.get("staff_role", "")
                 if staff_role_val.isdigit():
                     staff_role_ping = f"<@&{staff_role_val}>"
@@ -188,7 +189,6 @@ async def on_message(message):
                 else:
                     staff_role_ping = ""
 
-                # Create Embed matching requested layout
                 embed = discord.Embed(
                     title="📋 Players missing in the spreadsheet:",
                     description="\n".join(missing_players),
@@ -198,7 +198,8 @@ async def on_message(message):
                 await target_chan.send(content=staff_role_ping, embed=embed)
 
     except Exception as e:
-        logger.error(f"Error processing audit for channel {message.channel.id}: {e}")
+        print(f"!!! ERROR processing audit in channel {message.channel.id}: {e}", flush=True)
+        traceback.print_exc()
         await message.remove_reaction("⏳", bot.user)
         await message.add_reaction("❌")
 
