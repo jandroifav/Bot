@@ -11,15 +11,9 @@ import discord
 from discord.ext import commands
 from flask import Flask
 
-# ---------------------------------------------------------
-# Logging Setup
-# ---------------------------------------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("RegimentBot")
 
-# ---------------------------------------------------------
-# Keep-Alive HTTP Server (Fixes Free Render Web Service Timeout)
-# ---------------------------------------------------------
 app = Flask(__name__)
 
 @app.route("/")
@@ -30,16 +24,10 @@ def run_web_server():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 
-# ---------------------------------------------------------
-# Discord Bot Setup
-# ---------------------------------------------------------
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ---------------------------------------------------------
-# Google Sheets Auth & Configuration Loader
-# ---------------------------------------------------------
 CONFIG_SHEET_ID = os.environ.get("SPREADSHEET_ID", "1F1V-fgge7UhaQmqgZsEtf6mExGNJU_JFSHfHr7fJ2lQ")
 REGIMENT_CONFIGS = {}
 
@@ -102,9 +90,6 @@ def load_configs():
         print(f"Failed to load spreadsheet configurations: {e}", flush=True)
         traceback.print_exc()
 
-# ---------------------------------------------------------
-# Bot Commands & Event Listeners
-# ---------------------------------------------------------
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user.name} ({bot.user.id})", flush=True)
@@ -139,22 +124,17 @@ async def on_message(message):
         reg_ss = gc.open_by_key(cfg["spreadsheet_id"])
         input_ws = reg_ss.worksheet("Input")
 
-        # 1. Clear previous missing roster outputs in P6:P37
         safe_sheet_action(input_ws.batch_clear, ["P6:P37"])
 
-        # 2. Paste raw audit text into Input!C3
         safe_sheet_action(input_ws.update_acell, "C3", raw_text)
 
-        # 3. Call Google Apps Script Web App Endpoint
         if cfg.get("script_url"):
             print(f"Calling Apps Script: {cfg['script_url']}", flush=True)
             response = requests.post(cfg["script_url"], json={"action": "run"}, timeout=45)
             
-            # If Apps Script returns 404 or non-200, log warning but continue reading sheet if audit was logged
             if response.status_code != 200:
                 print(f"Warning: Apps Script endpoint returned {response.status_code}. Continuing sheet read...", flush=True)
 
-        # 4. Read missing players populated in P6:P37
         missing_vals = safe_sheet_action(input_ws.get, "P6:P37")
         missing_players = []
         if missing_vals:
@@ -162,11 +142,9 @@ async def on_message(message):
                 if row and len(row) > 0 and str(row[0]).strip():
                     missing_players.append(str(row[0]).strip())
 
-        # 5. React with Checkmark on original audit
         await message.remove_reaction("⏳", bot.user)
         await message.add_reaction("✅")
 
-        # 6. Send Missing Roster Notification to Target Channel
         if missing_players:
             target_channel_id = 1506368484529934476
             target_chan = bot.get_channel(target_channel_id)
@@ -177,7 +155,6 @@ async def on_message(message):
                     print(f"Could not fetch target missing players channel: {fetch_err}", flush=True)
 
             if target_chan:
-                # Safely format staff role ping
                 staff_role_val = cfg.get("staff_role", "").strip()
                 if staff_role_val.isdigit():
                     staff_role_ping = f"<@&{staff_role_val}>"
@@ -200,9 +177,6 @@ async def on_message(message):
         await message.remove_reaction("⏳", bot.user)
         await message.add_reaction("❌")
         
-# ---------------------------------------------------------
-# Application Entry Point
-# ---------------------------------------------------------
 if __name__ == "__main__":
     token = os.environ.get("DISCORD_TOKEN")
     if not token:
