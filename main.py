@@ -1,57 +1,169 @@
-import datetime
+import os
+import sys
+import json
+import logging
+import requests
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+import discord
+from discord.ext import commands
 
-def process_audit_event(input_ws, raw_audit_text, script_url):
-    # 1. Clear previous missing roster entries in P6:P37
-    safe_sheet_action(input_ws.batch_clear, ["P6:P37"])
+# ---------------------------------------------------------
+# Logging & Discord Setup
+# ---------------------------------------------------------
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("RegimentBot")
 
-    # 2. Extract Audit Date from line 2 of raw audit text for validation
-    lines = [line.strip() for line in raw_audit_text.split("\n") if line.strip()]
-    audit_date_str = None
-    if len(lines) >= 2:
-        date_line = lines[1].replace("Date:", "").replace("date:", "").strip()
-        # Look for standard DD/MM/YYYY format
-        import re
-        match = re.search(r"\d{2}/\d{2}/\d{4}", date_line)
-        if match:
-            audit_date_str = match.group(0)
+intents = discord.Intents.default()
+intents.message_content = True
+bot = commands.Bot(command_prefix="!", intents=intents)
 
-    # 3. Check Weekly Date Boundaries in J3 (Start Date) and K3 (End Date)
-    if audit_date_str:
-        start_date_val = safe_sheet_action(input_ws.acell, "J3").value
-        end_date_val = safe_sheet_action(input_ws.acell, "K3").value
-        
-        try:
-            audit_dt = datetime.datetime.strptime(audit_date_str, "%d/%m/%Y")
-            if start_date_val and end_date_val:
-                start_dt = datetime.datetime.strptime(str(start_date_val).strip(), "%d/%m/%Y")
-                end_dt = datetime.datetime.strptime(str(end_date_val).strip(), "%d/%m/%Y")
-                
-                if not (start_dt <= audit_dt <= end_dt):
-                    return {
-                        "status": "error",
-                        "message": f"⚠️ Audit date (`{audit_date_str}`) falls outside the active week boundary (`{start_date_val}` to `{end_date_val}`)."
-                    }
-        except ValueError:
-            pass  # Fall through if date formatting fails to parse strictly
+# ---------------------------------------------------------
+# Google Sheets Auth & Configuration Loader
+# ---------------------------------------------------------
+CONFIG_SHEET_ID = os.environ.get("SPREADSHEET_ID", "1F1V-fgge7UhaQmqgZsEtf6mExGNJU_JFSHfHr7fJ2lQ")
+REGIMENT_CONFIGS = {}
 
-    # 4. Paste raw audit text into C3
-    safe_sheet_action(input_ws.update_acell, "C3", raw_audit_text)
-
-    # 5. Trigger Google Apps Script Web App
-    response = requests.post(script_url, json={"action": "run"}, timeout=45)
+def get_gspread_client():
+    creds_json = os.environ.get("GOOGLE_CREDENTIALS")
+    if not creds_json:
+        raise ValueError("Missing GOOGLE_CREDENTIALS environment variable.")
     
-    if response.status_code != 200:
-        return {"status": "error", "message": "Failed to communicate with Google Apps Script."}
+    creds_dict = json.loads(creds_json)
+    scope = [
+        "https://spreadsheets.google.com/feeds",
+        "https://www.googleapis.com/auth/drive"
+    ]
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    return gspread.authorize(creds)
 
-    # 6. Read Missing Roster entries populated by Apps Script in P6:P37
-    missing_vals = safe_sheet_action(input_ws.get, "P6:P37")
-    missing_players = []
-    if missing_vals:
-        for row in missing_vals:
-            if row and len(row) > 0 and str(row[0]).strip():
-                missing_players.append(str(row[0]).strip())
+def safe_sheet_action(func, *args, **kwargs):
+    """Wrapper to handle automatic retry or client re-auth on sheet calls."""
+    try:
+        return func(*args, **kwargs)
+    except Exception as e:
+        logger.error(f"Sheet action error: {e}")
+        raise e
 
-    return {
-        "status": "success",
-        "missing_players": missing_players
-    }
+def load_configs():
+    """Reads regiment channel configurations from Spreadsheet Info Storage."""
+    global REGIMENT_CONFIGS
+    try:
+        gc = get_gspread_client()
+        ss = gc.open_by_key(CONFIG_SHEET_ID)
+        config_ws = ss.worksheet("Spreadsheet Info Storage")
+        
+        # Expects headers in Row 1: Channel ID | Regiment Name | Spreadsheet ID | Apps Script URL | Error Channel ID
+        rows = config_ws.get_all_values()
+        if len(rows) < 2:
+            logger.warning("No configuration rows found in Spreadsheet Info Storage.")
+            return
+
+        new_configs = {}
+        for row in rows[1:]:
+            if len(row) >= 4 and row[0].strip():
+                channel_id = int(row[0].strip())
+                new_configs[channel_id] = {
+                    "regiment_name": row[1].strip(),
+                    "spreadsheet_id": row[2].strip(),
+                    "script_url": row[3].strip(),
+                    "error_channel_id": int(row[4].strip()) if len(row) > 4 and row[4].strip().isdigit() else None
+                }
+        
+        REGIMENT_CONFIGS = new_configs
+        logger.info(f"Successfully loaded {len(REGIMENT_CONFIGS)} regiment channel configurations.")
+    except Exception as e:
+        logger.error(f"Failed to load spreadsheet configurations: {e}")
+
+# ---------------------------------------------------------
+# Bot Commands & Event Listeners
+# ---------------------------------------------------------
+@bot.event
+async def on_ready():
+    logger.info(f"Logged in as {bot.user.name} ({bot.user.id})")
+    load_configs()
+
+@bot.command(name="reload")
+async def reload_config_command(ctx):
+    """Allows admins to hot-reload spreadsheet settings without restarting."""
+    load_configs()
+    await ctx.send(f"✅ Successfully reloaded configurations! Loaded {len(REGIMENT_CONFIGS)} regiment channel configs.")
+
+@bot.event
+async def on_message(message):
+    # Ignore bot messages
+    if message.author.bot:
+        return
+
+    # Process standard commands first (e.g. !reload)
+    await bot.process_commands(message)
+
+    # Check if message is in an audit channel
+    if message.channel.id not in REGIMENT_CONFIGS:
+        return
+
+    raw_text = message.content.strip()
+    if not raw_text.lower().startswith("event type:"):
+        return
+
+    cfg = REGIMENT_CONFIGS[message.channel.id]
+    await message.add_reaction("⏳")
+
+    try:
+        gc = get_gspread_client()
+        reg_ss = gc.open_by_key(cfg["spreadsheet_id"])
+        input_ws = reg_ss.worksheet("Input")
+
+        # 1. Clear previous missing roster outputs in P6:P37
+        safe_sheet_action(input_ws.batch_clear, ["P6:P37"])
+
+        # 2. Paste raw audit text into Input!C3
+        safe_sheet_action(input_ws.update_acell, "C3", raw_text)
+
+        # 3. Call Google Apps Script Web App Endpoint
+        response = requests.post(cfg["script_url"], json={"action": "run"}, timeout=45)
+        
+        if response.status_code != 200:
+            raise Exception(f"Google Apps Script returned HTTP {response.status_code}: {response.text}")
+
+        res_data = response.json()
+        if res_data.get("status") == "error":
+            raise Exception(f"Apps Script Error: {res_data.get('message')}")
+
+        # 4. Read missing players populated by Apps Script in P6:P37
+        missing_vals = safe_sheet_action(input_ws.get, "P6:P37")
+        missing_players = []
+        if missing_vals:
+            for row in missing_vals:
+                if row and len(row) > 0 and str(row[0]).strip():
+                    missing_players.append(str(row[0]).strip())
+
+        # 5. Success UI Feedback
+        await message.remove_reaction("⏳", bot.user)
+        await message.add_reaction("✅")
+
+        if missing_players:
+            missing_fmt = "\n".join([f"• `{p}`" for p in missing_players])
+            await message.reply(f"⚠️ **Audit Processed**, but the following users were not found on the Memberlist roster:\n{missing_fmt}")
+
+    except Exception as e:
+        logger.error(f"Error processing audit for channel {message.channel.id}: {e}")
+        await message.remove_reaction("⏳", bot.user)
+        await message.add_reaction("❌")
+        
+        # Report error to designated error channel if configured
+        if cfg.get("error_channel_id"):
+            err_chan = bot.get_channel(cfg["error_channel_id"])
+            if err_chan:
+                await err_chan.send(f"❌ **Audit Processing Failed** in <#{message.channel.id}>\n**Error:** `{e}`")
+
+# ---------------------------------------------------------
+# Application Entry Point
+# ---------------------------------------------------------
+if __name__ == "__main__":
+    token = os.environ.get("DISCORD_TOKEN")
+    if not token:
+        print("FATAL: DISCORD_TOKEN environment variable not set.", flush=True)
+        sys.exit(1)
+        
+    bot.run(token)
