@@ -4,7 +4,6 @@ import json
 import logging
 import requests
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
 import discord
 from discord.ext import commands
 
@@ -30,12 +29,8 @@ def get_gspread_client():
         raise ValueError("Missing GOOGLE_CREDENTIALS environment variable.")
     
     creds_dict = json.loads(creds_json)
-    scope = [
-        "https://spreadsheets.google.com/feeds",
-        "https://www.googleapis.com/auth/drive"
-    ]
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-    return gspread.authorize(creds)
+    # Authenticate using gspread's native google-auth helper
+    return gspread.service_account_from_dict(creds_dict)
 
 def safe_sheet_action(func, *args, **kwargs):
     """Wrapper to handle automatic retry or client re-auth on sheet calls."""
