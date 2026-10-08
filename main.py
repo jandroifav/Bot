@@ -137,8 +137,7 @@ async def on_message(message):
 
     cfg = REGIMENT_CONFIGS[message.channel.id]
     await message.add_reaction("⏳")
-
-    try:
+try:
         gc = get_gspread_client()
         reg_ss = gc.open_by_key(cfg["spreadsheet_id"])
         input_ws = reg_ss.worksheet("Input")
@@ -167,24 +166,32 @@ async def on_message(message):
                 if row and len(row) > 0 and str(row[0]).strip():
                     missing_players.append(str(row[0]).strip())
 
-        # 5. Success UI Feedback
+        # 5. Success UI Feedback on original audit message
         await message.remove_reaction("⏳", bot.user)
         await message.add_reaction("✅")
 
+        # 6. Send Missing Roster Notification to Target Channel
         if missing_players:
-            missing_fmt = "\n".join([f"• `{p}`" for p in missing_players])
-            await message.reply(f"⚠️ **Audit Processed**, but the following users were not found on the Memberlist roster:\n{missing_fmt}")
+            target_channel_id = 1506368484529934476
+            target_chan = bot.get_channel(target_channel_id) or await bot.fetch_channel(target_channel_id)
+
+            if target_chan:
+                # Prepare role ping if available in Column D
+                staff_role_ping = f"<@&{cfg['staff_role']}>" if cfg.get("staff_role") and cfg["staff_role"].isdigit() else f"@{cfg.get('staff_role', '')}"
+
+                # Create Embed matching screenshot format
+                embed = discord.Embed(
+                    title="📋 Players missing in the spreadsheet:",
+                    description="\n".join(missing_players),
+                    color=discord.Color.from_rgb(238, 44, 44)  # Red border bar
+                )
+
+                await target_chan.send(content=staff_role_ping, embed=embed)
 
     except Exception as e:
         logger.error(f"Error processing audit for channel {message.channel.id}: {e}")
         await message.remove_reaction("⏳", bot.user)
         await message.add_reaction("❌")
-        
-        # Report error to designated error channel if configured
-        if cfg.get("error_channel_id"):
-            err_chan = bot.get_channel(cfg["error_channel_id"])
-            if err_chan:
-                await err_chan.send(f"❌ **Audit Processing Failed** in <#{message.channel.id}>\n**Error:** `{e}`")
 
 # ---------------------------------------------------------
 # Application Entry Point
