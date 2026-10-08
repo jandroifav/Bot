@@ -71,7 +71,6 @@ def load_configs():
         ss = gc.open_by_key(CONFIG_SHEET_ID)
         config_ws = ss.worksheet("Spreadsheet Info Storage")
         
-        # Expects headers in Row 1: Channel ID | Regiment Name | Spreadsheet ID | Apps Script URL | Error Channel ID
         rows = config_ws.get_all_values()
         if len(rows) < 2:
             logger.warning("No configuration rows found in Spreadsheet Info Storage.")
@@ -79,20 +78,21 @@ def load_configs():
 
         new_configs = {}
         for row in rows[1:]:
-            if len(row) >= 4 and row[0].strip():
-                channel_id = int(row[0].strip())
+            # Ensure row has enough columns and column E (index 4) contains a valid Channel ID
+            if len(row) >= 5 and row[4].strip().isdigit():
+                channel_id = int(row[4].strip())
                 new_configs[channel_id] = {
-                    "regiment_name": row[1].strip(),
-                    "spreadsheet_id": row[2].strip(),
-                    "script_url": row[3].strip(),
-                    "error_channel_id": int(row[4].strip()) if len(row) > 4 and row[4].strip().isdigit() else None
+                    "regiment_name": row[0].strip(),
+                    "spreadsheet_id": row[1].strip(),
+                    "script_url": row[2].strip(),
+                    "staff_role": row[3].strip(),
+                    "error_channel_id": None  # Optional error channel ID
                 }
         
         REGIMENT_CONFIGS = new_configs
         logger.info(f"Successfully loaded {len(REGIMENT_CONFIGS)} regiment channel configurations.")
     except Exception as e:
         logger.error(f"Failed to load spreadsheet configurations: {e}")
-
 # ---------------------------------------------------------
 # Bot Commands & Event Listeners
 # ---------------------------------------------------------
